@@ -114,7 +114,23 @@ impl Fill {
   }
 }
 #[derive(Debug)]
-pub struct Login;
+pub struct Login {
+  pub sendercompid: String,
+  pub targetcompid: String,
+  pub seqno: u32,
+}
+impl Login {
+  fn new(msg: &HashMap<i32, &str>) -> Self {
+    Self {
+      sendercompid: msg.get(&49).unwrap().to_string(),
+      targetcompid: msg.get(&56).unwrap().to_string(),
+      seqno: msg.get(&34).unwrap().parse().unwrap(),
+    }
+  }
+  pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32) -> Vec<u8> {
+    serialize("A", sendercompid, targetcompid, seqno, &HashMap::new())
+  }
+}
 #[derive(Debug)]
 pub struct Logout;
 #[derive(Debug)]
@@ -232,7 +248,7 @@ pub fn parse(fixstr: &str ) -> Result<Message, FixError>  {
   let hash = to_fix_hash(fixstr); // HashMap<i32, &str>
   if let Some(&msg_type) = hash.get(&35) {
     if msg_type == "A" {
-      return Ok(Message::Login(Login{}));
+      return Ok(Message::Login(Login::new(&hash)));
     } else if msg_type == "5" {
       return Ok(Message::Logout(Logout{}));
     } else if msg_type == "0" {
