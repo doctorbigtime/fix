@@ -7,10 +7,6 @@ use std::collections::HashMap;
 use std::str;
 use std::fmt;
 use std::io::{Cursor, Write};
-// use std::thread;
-// use std::sync::mpsc;
-// use std::sync::Arc;
-// use std::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FixErrorKind {
@@ -40,13 +36,6 @@ impl fmt::Display for FixError {
     }
   }
 }
-
-// type FixHash = HashMap<i32, &str>;
-
-// #[derive(Debug, Clone, Error)]
-// pub struct FixMissingFieldError {
-//   field: u32,
-// }
 
 fn get_or_fail(m: &HashMap<i32, &str>, field : i32) -> Result<String, FixError> {
   m.get(&field).map(|s| s.to_string()).ok_or(FixError{ kind: FixErrorKind::MissingField, field: field})
@@ -131,24 +120,54 @@ pub struct Logout;
 #[derive(Debug)]
 pub struct Heartbeat;
 impl Heartbeat {
-  // fn serialize() -> &[u8] {
-    // let m = HashMap<i32, &str>
-    // retu
-  // }
+  pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32) -> Vec<u8> {
+    serialize("0", sendercompid, targetcompid, seqno, &HashMap::new())
+  }
 }
 
-fn serialize<'a>(msg: &HashMap<i32, &str>, buf: &'a mut [u8]) -> &'a [u8]{
-  let mut header = [0 as u8; 1024];
-  let mut cksum = [0 as u8; 8];
-
+fn serialize_body<'a>(msg: &HashMap<i32, &str>, buf: &'a mut [u8]) -> &'a [u8]{
   let mut cursor = Cursor::new(buf);
-  msg.get(&35).unwrap()
   for (k,v) in msg.iter()
     .filter(|&(k,v)| !vec![8,9,35,34].contains(k)) {
       write!(cursor, "{}={}\x01", k,v).expect("can't write!()");
   }
   let len = cursor.position() as usize;
   return &cursor.into_inner()[..len];
+}
+
+fn serialize_head<'a>(msg_type: &str, sendercompid: &str, targetcompid: &str, seqno: u32, body: &[u8], buf: &'a mut [u8]) -> &'a [u8] {
+  let timestamp_format = "YYYYMMDD-HH:MM:SS.sss";
+  let mut cursor = Cursor::new(buf);
+  let msg_len = 4 + msg_type.len()
+              + 4 + sendercompid.len() + 4 + targetcompid.len()
+              // + 4 + timestamp_format.len() + 4 + 7
+              + 4 + 7 // seqno
+              + body.len();
+  write!(cursor, "8=FIX4.2\x019={}\x0135={}\x0149={}\x0156={}\x0134={:07}\x01", msg_len, msg_type, sendercompid, targetcompid, seqno).unwrap();
+  let len = cursor.position() as usize;
+  return &cursor.into_inner()[..len];
+}
+
+fn serialize<'a>(msg_type: &str, sendercompid: &str, targetcompid: &str, seqno: u32, msg: &HashMap<i32, &str>) -> Vec<u8> {
+  let mut body_buf = [0 as u8; 1024];
+  let mut head_buf = [0 as u8; 1024];
+  let body = serialize_body(&msg, &mut body_buf[..]);
+  let head = serialize_head(msg_type, sendercompid, targetcompid, seqno, body, &mut head_buf[..]);
+  let mut tail_buf = [0 as u8; 8];
+  write!(&mut tail_buf[..], "10={}\x01", get_checksum(body, head)).unwrap();
+  [head, body, &tail_buf[..7]].concat()
+}
+
+fn get_checksum(header: &[u8], body: &[u8]) -> u8 {
+  let mut checksum : usize = 0;
+  // TODO sfortas vectorize
+  for byte in header {
+    checksum += *byte as usize;
+  }
+  for byte in body {
+    checksum += *byte as usize;
+  }
+  return (checksum & 0xff) as u8;
 }
 
 #[derive(Debug)]
@@ -347,82 +366,21 @@ fn test_atoi() {
 }
 
 #[test]
+fn test_serialize_body() {
+  let msg : HashMap<i32, &str> = vec![(8,"FIX4.2"),(9,"1234"),(52,"BAH"),(54,"QUX"),(99,"FOOBAR")].into_iter().collect();
+  let mut body_buf = [0 as u8; 1024];
+  let body = serialize_body(&msg, &mut body_buf[..]);
+  let body_str =str::from_utf8(&body).unwrap();
+  assert!(body_str.contains("52=BAH\x01") &&
+          body_str.contains("54=QUX\x01") &&
+          body_str.contains("99=FOOBAR\x01"));
+}
+
+#[test]
 fn test_serialize() {
   let msg : HashMap<i32, &str> = vec![(8,"FIX4.2"),(9,"1234"),(52,"BAH"),(54,"QUX"),(99,"FOOBAR")].into_iter().collect();
   // assert_eq!(serialize(msg), "52=BAH\x0154=QUX\x0199=FOOBAR\x01");
-  let mut buf = [0 as u8; 1024];
-  let msg_buf = serialize(&msg, &mut buf[..]);
-  println!("{}", str::from_utf8(msg_buf).unwrap());
+  let buf = serialize("0", "SENDERCOMP", "TARGETCOMP", 1234, &msg);
+  println!("{}", str::from_utf8(&buf).unwrap());
 }
-
-// enum Msg {
-//   NewJob(Job),
-//   Terminate,
-// }
-
-// pub struct ThreadPool {
-//   workers: Vec<Worker>,
-//   sender: mpsc::Sender<Msg>,
-// }
-
-// impl ThreadPool {
-//   pub fn new(size: usize) -> ThreadPool {
-//     assert!(size > 0);
-//     let (sender, receiver) = mpsc::channel();
-//     let receiver = Arc::new(Mutex::new(receiver));
-//     let mut workers = Vec::with_capacity(size);
-//     for id in 0..size {
-//       workers.push(Worker::new(id,Arc::clone(&receiver)));
-//     }
-//     ThreadPool { workers, sender }
-//   }
-//   pub fn execute<F>(&self, f: F) 
-//     where
-//     F: FnOnce() + Send + 'static,
-//   {
-//     let job = Box::new(f);
-//     self.sender.send(Msg::NewJob(job)).unwrap();
-//   }
-// }
-
-// impl Drop for ThreadPool {
-//   fn drop(&mut self) {
-//     println!("Sending terminate to all workers.");
-//     for _ in &self.workers {
-//       self.sender.send(Msg::Terminate).unwrap();
-//     }
-//     for worker in &mut self.workers {
-//       println!("Shutting down worker {}", worker.id);
-//       if let Some(thread) = worker.thread.take() {
-//         thread.join().unwrap();
-//       }
-//     }
-//   }
-// }
-
-// struct Worker {
-//   id: usize,
-//   thread: Option<thread::JoinHandle<()>>,
-// }
-
-// impl Worker {
-//   fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Msg>>>) -> Worker {
-//     let thread = thread::spawn(move || loop {
-//       let msg = receiver.lock().unwrap().recv().unwrap();
-//       match msg {
-//         Msg::NewJob(job) => {
-//           println!("Worker {} got a job; executing", id);
-//           job();
-//         }
-//         Msg::Terminate => {
-//           println!("Worker {} was told to terminate.", id);
-//           break;
-//         }
-//       }
-//     });
-//     Worker{ id:id, thread:Some(thread) }
-//   }
-// }
-
-// type Job = Box<dyn FnOnce() + Send + 'static>;
 
