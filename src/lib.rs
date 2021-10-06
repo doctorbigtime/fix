@@ -8,6 +8,8 @@ use std::str;
 use std::fmt;
 use std::io::{Cursor, Write};
 
+use chrono::Utc;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FixErrorKind {
   Parse,
@@ -43,30 +45,30 @@ fn get_or_fail(m: &HashMap<i32, &str>, field : i32) -> Result<String, FixError> 
 
 #[derive(Debug)]
 pub struct NewOrder {
-    symbol: String,
-    clordid: String,
-    price: i64,
-    qty: u32,
-    side: char,
+    pub symbol: String,
+    pub clordid: String,
+    pub price: i32,
+    pub qty: i32,
+    pub side: char,
 }
 impl NewOrder {
-  fn new(m: &HashMap<i32, &str>) -> Result<NewOrder, FixError> {
+  pub fn new(m: &HashMap<i32, &str>) -> Result<NewOrder, FixError> {
     let symbol = get_or_fail(m, 55)?;
     let clordid = get_or_fail(m, 11)?;
     let price  = get_or_fail(m, 44)?;
     let price : f64 = price.parse().unwrap();
     let price = price * 10000.0;
-    let price = price as i64;
+    let price = price as i32;
     let side = get_or_fail(m, 54)?;
     let side = if "1" == side { 'B' } else { 'S' };
     let qty = get_or_fail(m, 38)?;
-    let qty : u32 = qty.parse().unwrap();
+    let qty : i32 = qty.parse().unwrap();
     return Ok(NewOrder{symbol, clordid, price, qty, side})
   }
 }
 #[derive(Debug)]
 pub struct CancelOrder {
-    clordid: String,
+    pub clordid: String,
 }
 impl CancelOrder {
   fn new(m : &HashMap<i32, &str>) -> Result<CancelOrder, FixError> {
@@ -84,30 +86,38 @@ impl NewOrderAck {
     let clordid = get_or_fail(m, 11)?;
     return Ok(NewOrderAck{symbol: m.get(&55).map(|s| s.to_string()), clordid: clordid});
   }
+  pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32, clordid: &str, orderid: &str, symbol: &str, price: i32, qty: i32, side: char) -> Vec<u8> {
+    let price = (price as f64) / 10000.0;
+    let price = format!("{:.4}", price);
+    let qty = qty.to_string();
+    let side = side.to_string();
+    let fields : HashMap<i32, &str> = vec![(11, clordid), (37, orderid), (20, "0"), (39, "0"), (150, "0"), (55, symbol), (44, &price), (38, &qty), (54, &side)].into_iter().collect();
+    serialize("8", sendercompid, targetcompid, seqno, &fields)
+  }
 }
 #[derive(Debug)]
 pub struct CancelOrderAck {
-    symbol: String,
-    clorid: u64,
+    pub symbol: String,
+    pub clorid: u64,
 }
 #[derive(Debug)]
 pub struct Fill {
-    symbol: String,
-    clorid: String,
-    exec_price: i64,
-    exec_qty: u32,
-    side: char,
-    aggr_ind: char,
+    pub symbol: String,
+    pub clorid: String,
+    pub exec_price: i32,
+    pub exec_qty: i32,
+    pub side: char,
+    pub aggr_ind: char,
 }
 impl Fill {
-  fn new(m: &HashMap<i32, &str>) -> Result<Fill, FixError> {
+  pub fn new(m: &HashMap<i32, &str>) -> Result<Fill, FixError> {
     let symbol = get_or_fail(m, 55)?;
     let clordid = get_or_fail(m, 11)?;
     let exec_price = get_or_fail(m, 31)?;
     let exec_price : f64 = exec_price.parse().map_err(|_| FixError{kind: FixErrorKind::InvalidFormat, field: 31})?;
-    let exec_price = (exec_price * 10000.0) as i64;
+    let exec_price = (exec_price * 10000.0) as i32;
     let exec_qty = m.get(&32).ok_or(FixError{kind:FixErrorKind::MissingField, field:32})?;
-    let exec_qty : u32 = exec_qty.parse().map_err(|_| FixError{ kind: FixErrorKind::InvalidFormat, field: 32})?;
+    let exec_qty : i32 = exec_qty.parse().map_err(|_| FixError{ kind: FixErrorKind::InvalidFormat, field: 32})?;
     let side = m.get(&54).ok_or(FixError{kind:FixErrorKind::MissingField, field:54})?;
     let side = if &"1" == side { 'B' } else { 'S' };
     return Ok(Fill{symbol: symbol, clorid: clordid, exec_price: exec_price, exec_qty: exec_qty, side: side, aggr_ind: 'A'});
@@ -120,7 +130,7 @@ pub struct Login {
   pub seqno: u32,
 }
 impl Login {
-  fn new(msg: &HashMap<i32, &str>) -> Self {
+  pub fn new(msg: &HashMap<i32, &str>) -> Self {
     Self {
       sendercompid: msg.get(&49).unwrap().to_string(),
       targetcompid: msg.get(&56).unwrap().to_string(),
@@ -144,7 +154,7 @@ impl Heartbeat {
 fn serialize_body<'a>(msg: &HashMap<i32, &str>, buf: &'a mut [u8]) -> &'a [u8]{
   let mut cursor = Cursor::new(buf);
   for (k,v) in msg.iter()
-    .filter(|&(k,v)| !vec![8,9,35,34].contains(k)) {
+    .filter(|&(k,_)| !vec![8,9,35,34].contains(k)) {
       write!(cursor, "{}={}\x01", k,v).expect("can't write!()");
   }
   let len = cursor.position() as usize;
@@ -155,11 +165,14 @@ fn serialize_head<'a>(msg_type: &str, sendercompid: &str, targetcompid: &str, se
   let timestamp_format = "YYYYMMDD-HH:MM:SS.sss";
   let mut cursor = Cursor::new(buf);
   let msg_len = 4 + msg_type.len()
-              + 4 + sendercompid.len() + 4 + targetcompid.len()
-              // + 4 + timestamp_format.len() + 4 + 7
+              + 4 + sendercompid.len() 
+              + 4 + targetcompid.len()
+              + 4 + timestamp_format.len()
               + 4 + 7 // seqno
               + body.len();
-  write!(cursor, "8=FIX4.2\x019={}\x0135={}\x0149={}\x0156={}\x0134={:07}\x01", msg_len, msg_type, sendercompid, targetcompid, seqno).unwrap();
+  let dt = Utc::now();
+  let dtstr = dt.format("%Y%m%d-%T%.3f");
+  write!(cursor, "8=FIX4.2\x019={}\x0135={}\x0152={}\x0149={}\x0156={}\x0134={:07}\x01", msg_len, msg_type, dtstr, sendercompid, targetcompid, seqno).unwrap();
   let len = cursor.position() as usize;
   return &cursor.into_inner()[..len];
 }
@@ -170,7 +183,7 @@ fn serialize<'a>(msg_type: &str, sendercompid: &str, targetcompid: &str, seqno: 
   let body = serialize_body(&msg, &mut body_buf[..]);
   let head = serialize_head(msg_type, sendercompid, targetcompid, seqno, body, &mut head_buf[..]);
   let mut tail_buf = [0 as u8; 8];
-  write!(&mut tail_buf[..], "10={}\x01", get_checksum(body, head)).unwrap();
+  write!(&mut tail_buf[..], "10={:03}\x01", get_checksum(body, head)).unwrap();
   [head, body, &tail_buf[..7]].concat()
 }
 
@@ -206,7 +219,7 @@ static FIX_SEPARATOR : &str = "\x01";
 ///
 /// ```
 /// use fix::to_fix_hash;
-/// let fix_string = "8=FIX4.2\x0135=A\x0134=1234\x0159=FOOBAR\x0110=000\x01";
+/// let fix_string = "8=FIX4.2\x0135=A\x0134=1234\x0149=FOOBAR\x0156=BAZQUX\x0110=000\x01";
 /// let fix_msg = to_fix_hash(&fix_string);
 /// assert_eq!(fix_msg.get(&35), Some(&"A"));
 /// ```
@@ -241,7 +254,7 @@ pub fn to_fix_hash(string: &str) -> HashMap<i32, &str> {
 /// ```
 /// use fix::parse;
 /// use fix::Message;
-/// let fix_string = "8=FIX4.2\x0135=A\x0134=1234\x0159=FOOBAR\x0110=000\x01";
+/// let fix_string = "8=FIX4.2\x0135=A\x0134=1234\x0149=BAZQUX\x0156=FOOBAR\x0110=000\x01";
 /// assert!(matches!(parse(&fix_string).unwrap(), Message::Login{..}));
 /// ```
 pub fn parse(fixstr: &str ) -> Result<Message, FixError>  {

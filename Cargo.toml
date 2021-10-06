@@ -11,6 +11,7 @@ path = "../epoll"
 
 [dependencies]
 libc = "0.2.98"
+chrono = "0.4"
 
 [profile.release]
 opt-level = 3
