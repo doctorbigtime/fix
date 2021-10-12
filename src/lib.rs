@@ -10,6 +10,31 @@ use std::io::{Cursor, Write};
 
 use chrono::Utc;
 
+#[allow(non_upper_case_globals)]
+pub mod tags {
+  pub const MsgType: i32 = 35;
+  pub const MsgSeqNum: i32 = 34;
+  pub const SenderCompID: i32 = 49;
+  pub const TargetCompID: i32 = 56;
+  pub const ExecType: i32 = 150;
+  pub const Symbol: i32 = 55;
+  pub const Price: i32 = 44;
+  pub const ClOrdId: i32 = 11;
+  pub const OrigClOrdId: i32 = 41;
+  pub const OrderID: i32 = 37;
+  pub const OrdStatus: i32 = 39;
+  pub const OrderQty: i32 = 38;
+  pub const Side: i32 = 54;
+  pub const ExecTransType: i32 = 20;
+  pub const LastPx: i32 = 31;
+  pub const LastShares: i32 = 32;
+  pub const LeavesQty: i32 = 151;
+  pub const ExecID: i32 = 17;
+  pub const BeginString: i32 = 8;
+  pub const BodyLength: i32 = 9;
+  pub const CheckSum: i32 = 10;
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FixErrorKind {
   Parse,
@@ -53,15 +78,15 @@ pub struct NewOrder {
 }
 impl NewOrder {
   pub fn new(m: &HashMap<i32, &str>) -> Result<NewOrder, FixError> {
-    let symbol = get_or_fail(m, 55)?;
-    let clordid = get_or_fail(m, 11)?;
-    let price  = get_or_fail(m, 44)?;
+    let symbol = get_or_fail(m, tags::Symbol)?;
+    let clordid = get_or_fail(m, tags::ClOrdId)?;
+    let price  = get_or_fail(m, tags::Price)?;
     let price : f64 = price.parse().unwrap();
     let price = price * 10000.0;
     let price = price as i32;
-    let side = get_or_fail(m, 54)?;
+    let side = get_or_fail(m, tags::Side)?;
     let side = if "1" == side { 'B' } else { 'S' };
-    let qty = get_or_fail(m, 38)?;
+    let qty = get_or_fail(m, tags::OrderQty)?;
     let qty : i32 = qty.parse().unwrap();
     return Ok(NewOrder{symbol, clordid, price, qty, side})
   }
@@ -69,11 +94,13 @@ impl NewOrder {
 #[derive(Debug)]
 pub struct CancelOrder {
     pub clordid: String,
+    pub origclordid: String,
 }
 impl CancelOrder {
   fn new(m : &HashMap<i32, &str>) -> Result<CancelOrder, FixError> {
-    let clordid = get_or_fail(m, 11)?;
-    return Ok(CancelOrder{clordid});
+    let clordid = get_or_fail(m, tags::ClOrdId)?;
+    let origclordid = get_or_fail(m, tags::OrigClOrdId)?;
+    return Ok(CancelOrder{clordid, origclordid});
   }
 }
 #[derive(Debug)]
@@ -83,15 +110,15 @@ pub struct NewOrderAck {
 }
 impl NewOrderAck {
   fn new(m: &HashMap<i32, &str>) -> Result<NewOrderAck, FixError> {
-    let clordid = get_or_fail(m, 11)?;
-    return Ok(NewOrderAck{symbol: m.get(&55).map(|s| s.to_string()), clordid: clordid});
+    let clordid = get_or_fail(m, tags::ClOrdId)?;
+    return Ok(NewOrderAck{symbol: m.get(&tags::Symbol).map(|s| s.to_string()), clordid: clordid});
   }
   pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32, clordid: &str, orderid: &str, symbol: &str, price: i32, qty: i32, side: char) -> Vec<u8> {
     let price = (price as f64) / 10000.0;
     let price = format!("{:.4}", price);
     let qty = qty.to_string();
     let side = side.to_string();
-    let fields : HashMap<i32, &str> = vec![(11, clordid), (37, orderid), (20, "0"), (39, "0"), (150, "0"), (55, symbol), (44, &price), (38, &qty), (54, &side)].into_iter().collect();
+    let fields : HashMap<i32, &str> = vec![(tags::ClOrdId, clordid), (tags::OrderID, orderid), (tags::ExecTransType, "0"), (tags::OrdStatus, "0"), (tags::ExecType, "0"), (tags::Symbol, symbol), (tags::Price, &price), (tags::OrderQty, &qty), (tags::Side, &side)].into_iter().collect();
     serialize("8", sendercompid, targetcompid, seqno, &fields)
   }
 }
@@ -99,6 +126,12 @@ impl NewOrderAck {
 pub struct CancelOrderAck {
     pub symbol: String,
     pub clorid: u64,
+}
+impl CancelOrderAck {
+  pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32, clordid: &str, origclordid: &str, orderid: &str, symbol: &str) -> Vec<u8> {
+    let fields : HashMap<i32, &str> = vec![(tags::ClOrdId, clordid), (tags::OrigClOrdId, origclordid), (tags::OrderID, orderid), (tags::ExecTransType, "0"), (tags::OrdStatus, "4"), (tags::ExecType, "4"), (tags::Symbol, symbol)].into_iter().collect();
+    serialize("8", sendercompid, targetcompid, seqno, &fields)
+  }
 }
 #[derive(Debug)]
 pub struct Fill {
@@ -111,16 +144,24 @@ pub struct Fill {
 }
 impl Fill {
   pub fn new(m: &HashMap<i32, &str>) -> Result<Fill, FixError> {
-    let symbol = get_or_fail(m, 55)?;
-    let clordid = get_or_fail(m, 11)?;
+    let symbol = get_or_fail(m, tags::Symbol)?;
+    let clordid = get_or_fail(m, tags::ClOrdId)?;
     let exec_price = get_or_fail(m, 31)?;
     let exec_price : f64 = exec_price.parse().map_err(|_| FixError{kind: FixErrorKind::InvalidFormat, field: 31})?;
     let exec_price = (exec_price * 10000.0) as i32;
-    let exec_qty = m.get(&32).ok_or(FixError{kind:FixErrorKind::MissingField, field:32})?;
-    let exec_qty : i32 = exec_qty.parse().map_err(|_| FixError{ kind: FixErrorKind::InvalidFormat, field: 32})?;
-    let side = m.get(&54).ok_or(FixError{kind:FixErrorKind::MissingField, field:54})?;
+    let exec_qty = m.get(&tags::LastShares).ok_or(FixError{kind:FixErrorKind::MissingField, field:tags::LastShares})?;
+    let exec_qty : i32 = exec_qty.parse().map_err(|_| FixError{ kind: FixErrorKind::InvalidFormat, field: tags::LastShares})?;
+    let side = m.get(&tags::Side).ok_or(FixError{kind:FixErrorKind::MissingField, field:tags::Side})?;
     let side = if &"1" == side { 'B' } else { 'S' };
     return Ok(Fill{symbol: symbol, clorid: clordid, exec_price: exec_price, exec_qty: exec_qty, side: side, aggr_ind: 'A'});
+  }
+  pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32, clordid: &str, orderid: &str, symbol: &str, execid: u64, exec_price: i32, exec_qty: i32, leaves_qty: i32, _side: char) -> Vec<u8> {
+    let tipe = if leaves_qty == 0 { "2" } else { "1" };
+    let execid = execid.to_string();
+    let exec_price = ((exec_price as f64)/10000.0).to_string();
+    let exec_qty = exec_qty.to_string();
+    let fields : HashMap<i32, &str> = vec![(tags::ClOrdId, clordid), (tags::OrderID, orderid), (tags::ExecTransType, "0"), (tags::OrdStatus, tipe), (tags::ExecType, tipe), (tags::Symbol, symbol), (tags::ExecID, &execid), (tags::LastPx, &exec_price), (tags::LastShares, &exec_qty) ].into_iter().collect();
+    serialize("8", sendercompid, targetcompid, seqno, &fields)
   }
 }
 #[derive(Debug)]
@@ -132,9 +173,9 @@ pub struct Login {
 impl Login {
   pub fn new(msg: &HashMap<i32, &str>) -> Self {
     Self {
-      sendercompid: msg.get(&49).unwrap().to_string(),
-      targetcompid: msg.get(&56).unwrap().to_string(),
-      seqno: msg.get(&34).unwrap().parse().unwrap(),
+      sendercompid: msg.get(&tags::SenderCompID).unwrap().to_string(),
+      targetcompid: msg.get(&tags::TargetCompID).unwrap().to_string(),
+      seqno: msg.get(&tags::MsgSeqNum).unwrap().parse().unwrap(),
     }
   }
   pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32) -> Vec<u8> {
@@ -154,7 +195,7 @@ impl Heartbeat {
 fn serialize_body<'a>(msg: &HashMap<i32, &str>, buf: &'a mut [u8]) -> &'a [u8]{
   let mut cursor = Cursor::new(buf);
   for (k,v) in msg.iter()
-    .filter(|&(k,_)| !vec![8,9,35,34].contains(k)) {
+    .filter(|&(k,_)| !vec![tags::BeginString, tags::BodyLength, tags::MsgType, tags::MsgSeqNum].contains(k)) {
       write!(cursor, "{}={}\x01", k,v).expect("can't write!()");
   }
   let len = cursor.position() as usize;
@@ -259,7 +300,7 @@ pub fn to_fix_hash(string: &str) -> HashMap<i32, &str> {
 /// ```
 pub fn parse(fixstr: &str ) -> Result<Message, FixError>  {
   let hash = to_fix_hash(fixstr); // HashMap<i32, &str>
-  if let Some(&msg_type) = hash.get(&35) {
+  if let Some(&msg_type) = hash.get(&tags::MsgType) {
     if msg_type == "A" {
       return Ok(Message::Login(Login::new(&hash)));
     } else if msg_type == "5" {
@@ -275,7 +316,7 @@ pub fn parse(fixstr: &str ) -> Result<Message, FixError>  {
       return Ok(Message::Cancel(obj));
     } else if msg_type == "8" {
       // return Err(FixError{kind:FixErrorKind::Parse, field:0});
-      if let Some(&ord_status) = hash.get(&150) {
+      if let Some(&ord_status) = hash.get(&tags::ExecType) {
         if ord_status == "0" {
           let obj = NewOrderAck::new(&hash)?;
           return Ok(Message::NewAck(obj));
@@ -287,9 +328,9 @@ pub fn parse(fixstr: &str ) -> Result<Message, FixError>  {
         // } else {
         }
       } else {
-        return Err(FixError{kind: FixErrorKind::MissingField, field:150});
+        return Err(FixError{kind: FixErrorKind::MissingField, field:tags::ExecType});
       }
-      return Err(FixError{kind: FixErrorKind::MissingField, field:150});
+      return Err(FixError{kind: FixErrorKind::MissingField, field:tags::ExecType});
     } else {
       return Err(FixError{kind: FixErrorKind::UnexpectedMessage, field:0});
     }
