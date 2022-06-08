@@ -33,11 +33,16 @@ pub mod tags {
   pub const BeginString: i32 = 8;
   pub const BodyLength: i32 = 9;
   pub const CheckSum: i32 = 10;
+  pub const Text: i32 = 58;
+  pub const EndSeqNo: i32 = 16;
+  pub const GapFillFlag: i32 = 123;
+  pub const NewSeqNo: i32 = 36;
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FixErrorKind {
   Parse,
+  Incomplete,
   MissingField,
   InvalidFormat,
   UnexpectedMessage,
@@ -54,6 +59,8 @@ impl fmt::Display for FixError {
     match self.kind {
       FixErrorKind::Parse =>
         write!(f, "Parse error"),
+      FixErrorKind::Incomplete =>
+        write!(f, "Incomplete message missing #{}", self.field),
       FixErrorKind::MissingField =>
         write!(f, "Message is missing field #{}", self.field),
       FixErrorKind::InvalidFormat =>
@@ -105,13 +112,14 @@ impl CancelOrder {
 }
 #[derive(Debug)]
 pub struct NewOrderAck {
-    symbol: Option<String>,
-    clordid: String,
+    // symbol: Option<String>,
+    // clordid: String,
 }
 impl NewOrderAck {
-  fn new(m: &HashMap<i32, &str>) -> Result<NewOrderAck, FixError> {
-    let clordid = get_or_fail(m, tags::ClOrdId)?;
-    return Ok(NewOrderAck{symbol: m.get(&tags::Symbol).map(|s| s.to_string()), clordid: clordid});
+  fn new(_m: &HashMap<i32, &str>) -> Result<NewOrderAck, FixError> {
+    // let clordid = get_or_fail(m, tags::ClOrdId)?;
+    // return Ok(NewOrderAck{symbol: m.get(&tags::Symbol).map(|s| s.to_string()), clordid: clordid});
+    return Ok(NewOrderAck{});
   }
   pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32, clordid: &str, orderid: &str, symbol: &str, price: i32, qty: i32, side: char) -> Vec<u8> {
     let price = (price as f64) / 10000.0;
@@ -130,6 +138,17 @@ pub struct CancelOrderAck {
 impl CancelOrderAck {
   pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32, clordid: &str, origclordid: &str, orderid: &str, symbol: &str) -> Vec<u8> {
     let fields : HashMap<i32, &str> = vec![(tags::ClOrdId, clordid), (tags::OrigClOrdId, origclordid), (tags::OrderID, orderid), (tags::ExecTransType, "0"), (tags::OrdStatus, "4"), (tags::ExecType, "4"), (tags::Symbol, symbol)].into_iter().collect();
+    serialize("8", sendercompid, targetcompid, seqno, &fields)
+  }
+}
+#[derive(Debug)]
+pub struct OrderReject {
+  pub symbol: String,
+  pub clordid: String,
+}
+impl OrderReject {
+  pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32, clordid: &str, symbol: &str, text: &str) -> Vec<u8> {
+    let fields : HashMap<i32, &str> = vec![(tags::ClOrdId, clordid), (tags::ExecTransType, "0"), (tags::OrdStatus, "8"), (tags::ExecType, "8"), (tags::Symbol, symbol), (tags::Text, text)].into_iter().collect();
     serialize("8", sendercompid, targetcompid, seqno, &fields)
   }
 }
@@ -191,6 +210,26 @@ impl Heartbeat {
     serialize("0", sendercompid, targetcompid, seqno, &HashMap::new())
   }
 }
+#[derive(Debug)]
+pub struct ResendRequest {
+  pub end_seqno: u32,
+}
+impl ResendRequest {
+  pub fn new(m: &HashMap<i32, &str>) -> Result<ResendRequest, FixError> {
+    let end_seqno = m.get(&tags::EndSeqNo).ok_or(FixError{kind:FixErrorKind::MissingField, field:tags::EndSeqNo})?;
+    let end_seqno = end_seqno.parse().map_err(|_| FixError{kind: FixErrorKind::InvalidFormat, field: tags::EndSeqNo})?;
+    Ok(ResendRequest{end_seqno: end_seqno})
+  }
+}
+#[derive(Debug)]
+pub struct SequenceReset;
+impl SequenceReset {
+  pub fn serialize(sendercompid: &str, targetcompid: &str, seqno: u32, new_seqno: u32, gap_fill: bool) -> Vec<u8> {
+    let new_seqno = new_seqno.to_string();
+    let fields : HashMap<i32, &str> = vec![(tags::GapFillFlag, if gap_fill { "Y" } else { "N" }), (tags::NewSeqNo, &new_seqno)].into_iter().collect();
+    serialize("4", sendercompid, targetcompid, seqno, &fields)
+  }
+}
 
 fn serialize_body<'a>(msg: &HashMap<i32, &str>, buf: &'a mut [u8]) -> &'a [u8]{
   let mut cursor = Cursor::new(buf);
@@ -250,6 +289,8 @@ pub enum Message {
   CancelAck(CancelOrderAck),
   Fill(Fill),
   Logout(Logout),
+  ResendRequest(ResendRequest),
+  SequenceReset(SequenceReset),
 }
 
 static FIX_SEPARATOR : &str = "\x01"; 
@@ -296,46 +337,61 @@ pub fn to_fix_hash(string: &str) -> HashMap<i32, &str> {
 /// use fix::parse;
 /// use fix::Message;
 /// let fix_string = "8=FIX4.2\x0135=A\x0134=1234\x0149=BAZQUX\x0156=FOOBAR\x0110=000\x01";
-/// assert!(matches!(parse(&fix_string).unwrap(), Message::Login{..}));
+/// let (bytes_eaten, login) = parse(&fix_string).unwrap();
+/// assert!(matches!(login, Message::Login{..}));
 /// ```
-pub fn parse(fixstr: &str ) -> Result<Message, FixError>  {
-  let hash = to_fix_hash(fixstr); // HashMap<i32, &str>
-  if let Some(&msg_type) = hash.get(&tags::MsgType) {
-    if msg_type == "A" {
-      return Ok(Message::Login(Login::new(&hash)));
-    } else if msg_type == "5" {
-      return Ok(Message::Logout(Logout{}));
-    } else if msg_type == "0" {
-      return Ok(Message::Heartbeat(Heartbeat{}));
-    } else if msg_type == "D" {
-      let obj = NewOrder::new(&hash)?;
-      return Ok(Message::New(obj));
-    } else if msg_type == "F" {
-      println!("Cancel {:?}!", hash);
-      let obj = CancelOrder::new(&hash)?;
-      return Ok(Message::Cancel(obj));
-    } else if msg_type == "8" {
-      // return Err(FixError{kind:FixErrorKind::Parse, field:0});
-      if let Some(&ord_status) = hash.get(&tags::ExecType) {
-        if ord_status == "0" {
-          let obj = NewOrderAck::new(&hash)?;
-          return Ok(Message::NewAck(obj));
-        } else if ord_status == "1" || ord_status == "2" {
-          let obj = Fill::new(&hash)?;
-          return Ok(Message::Fill(obj));
-        // } else if ord_status == "4" || ord_status == "C" {
-        //   // canceled
-        // } else {
+pub fn parse(fixstr: &str ) -> Result<(usize, Message), FixError>  {
+  if let Some(index) = fixstr.find("\x0110=") {
+    if fixstr.len() < index + 8 {
+      return Err(FixError{kind: FixErrorKind::Incomplete, field:tags::CheckSum});
+    }
+    let fixmsg = &fixstr[..index+8];
+    let bytes_eaten = index + 8;
+    let hash = to_fix_hash(fixmsg); // HashMap<i32, &str>
+    if let Some(&msg_type) = hash.get(&tags::MsgType) {
+      if msg_type == "A" {
+        return Ok((bytes_eaten, Message::Login(Login::new(&hash))));
+      } else if msg_type == "5" {
+        return Ok((bytes_eaten, Message::Logout(Logout{})));
+      } else if msg_type == "0" {
+        return Ok((bytes_eaten, Message::Heartbeat(Heartbeat{})));
+      } else if msg_type == "2" {
+        let rr = ResendRequest::new(&hash)?;
+        return Ok((bytes_eaten, Message::ResendRequest(rr)));
+      } else if msg_type == "4" {
+        return Ok((bytes_eaten, Message::SequenceReset(SequenceReset{})));
+      } else if msg_type == "D" {
+        let obj = NewOrder::new(&hash)?;
+        return Ok((bytes_eaten, Message::New(obj)));
+      } else if msg_type == "F" {
+        println!("Cancel {:?}!", hash);
+        let obj = CancelOrder::new(&hash)?;
+        return Ok((bytes_eaten, Message::Cancel(obj)));
+      } else if msg_type == "8" {
+        // return Err(FixError{kind:FixErrorKind::Parse, field:0});
+        if let Some(&ord_status) = hash.get(&tags::ExecType) {
+          if ord_status == "0" {
+            let obj = NewOrderAck::new(&hash)?;
+            return Ok((bytes_eaten, Message::NewAck(obj)));
+          } else if ord_status == "1" || ord_status == "2" {
+            let obj = Fill::new(&hash)?;
+            return Ok((bytes_eaten, Message::Fill(obj)));
+          // } else if ord_status == "4" || ord_status == "C" {
+          //   // canceled
+          // } else {
+          }
+        } else {
+          return Err(FixError{kind: FixErrorKind::MissingField, field:tags::ExecType});
         }
-      } else {
         return Err(FixError{kind: FixErrorKind::MissingField, field:tags::ExecType});
+      } else {
+        return Err(FixError{kind: FixErrorKind::UnexpectedMessage, field:0});
       }
-      return Err(FixError{kind: FixErrorKind::MissingField, field:tags::ExecType});
     } else {
-      return Err(FixError{kind: FixErrorKind::UnexpectedMessage, field:0});
+    Err(FixError{kind: FixErrorKind::MissingField, field:35})
     }
   } else {
-    Err(FixError{kind: FixErrorKind::MissingField, field:35})
+    return Err(FixError{kind: FixErrorKind::Incomplete, field:tags::CheckSum});
   }
 }
 
@@ -358,7 +414,7 @@ fn test_parse_new_order() {
     let out = parse(data);
     println!("{:?}", out);
     assert!(out.is_ok());
-    let msg = out.unwrap();
+    let (_, msg) = out.unwrap();
     // assert!(matches!(msg, Message::New{..}));
     match msg {
       Message::New(no) => {
@@ -372,7 +428,8 @@ fn test_parse_new_order() {
 
 #[test]
 fn test_parse_cancel() {
-    let data = b"8=FIX4.2\x0135=F\x0155=AAPL\x0139=100\x0111=CLORDID1\x0144=134.56\x0159=SENDER\x0110=101\x01";
+    let data = b"8=FIX4.2\x0135=F\x0155=AAPL\x0139=100\x0111=CXL-CLORDID1\x0141=CLORDID1\x0144=134.56\x0159=SENDER\x0110=101\x01";
+    let bytes = data.len();
     let data = str::from_utf8(data).unwrap();
     let out = parse(data);
     assert!(out.is_ok());
@@ -383,7 +440,9 @@ fn test_parse_cancel() {
         _ => false,
       }
     };
-    assert!(is_cancel(out.unwrap()));
+    let (bytes_eaten, msg) = out.unwrap();
+    assert_eq!(bytes_eaten, bytes);
+    assert!(is_cancel(msg));
 }
 
 #[test]
@@ -393,7 +452,8 @@ fn test_parse_ack() {
     let out = parse(data);
     assert!(out.is_ok());
     println!("{:?}", out);
-    assert!(matches!(out.unwrap(), Message::NewAck{..}));
+    let (_, msg) = out.unwrap();
+    assert!(matches!(msg, Message::NewAck{..}));
 }
 
 #[test]
@@ -403,7 +463,8 @@ fn test_parse_fill() {
     let out = parse(data);
     println!("{:?}", out);
     assert!(out.is_ok());
-    assert!(matches!(out.unwrap(), Message::Fill{..}));
+    let (_, msg) = out.unwrap();
+    assert!(matches!(msg, Message::Fill{..}));
 }
 
 #[test]
